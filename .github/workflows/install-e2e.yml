@@ -4,7 +4,7 @@ name: Install & Update E2E
 #
 # The support matrix -- every {os, install-method, update-method} combination
 # a user could be on -- lives in scripts/sandbox/generate-e2e-matrix.mjs.
-# generate-matrix expands it against the picked release tags into one leg
+# pick-releases expands it against the picked release tags into one leg
 # per {combination, tag}, split into one matrix job per OS:
 #
 #   Matrix: linux     the real curl|bash install one-liner, isolated by a
@@ -88,16 +88,24 @@ jobs:
     timeout-minutes: 5
     outputs:
       tags: ${{ steps.pick.outputs.tags }}
+      linux: ${{ steps.gen.outputs.linux }}
+      windows: ${{ steps.gen.outputs.windows }}
+      macos: ${{ steps.gen.outputs.macos }}
     steps:
-      # This job only reads tag names and trees, so take the cheap
-      # checkout: no blobs (filter), no other files (sparse), but DO fetch
-      # tags -- they are the whole input, and the default shallow checkout
-      # has none.
+      # Tag names + trees + two small scripts. blob:none keeps the fetch
+      # cheap (tags are the whole input; a default shallow checkout has
+      # none). Expand the matrix in THIS job: checkout@v6 turns
+      # sparse-checkout into filter=blob:none, then `git checkout` fetches
+      # missing objects from the promisor remote. A second sparse clone
+      # immediately after fetch-tags 429'd that follow-up (run 34350666891:
+      # "could not fetch ... from promisor remote").
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           filter: blob:none
           fetch-tags: true
-          sparse-checkout: scripts/sandbox/pick-release-tags.sh
+          sparse-checkout: |
+            scripts/sandbox/pick-release-tags.sh
+            scripts/sandbox/generate-e2e-matrix.mjs
           sparse-checkout-cone-mode: false
       - id: pick
         env:
@@ -130,28 +138,14 @@ jobs:
           done | jq -sc .)"
           echo "Annotated: $enriched"
           echo "tags=$enriched" >> "$GITHUB_OUTPUT"
-
-  # Expand the support matrix against the picked tags: one leg per
-  # {os, install-method, update-method, tag}, split into a matrix per OS.
-  generate-matrix:
-    name: Expand combinations
-    needs: pick-releases
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      linux: ${{ steps.gen.outputs.linux }}
-      windows: ${{ steps.gen.outputs.windows }}
-      macos: ${{ steps.gen.outputs.macos }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: scripts/sandbox/generate-e2e-matrix.mjs
-          sparse-checkout-cone-mode: false
+      # Expand the support matrix against the picked tags: one leg per
+      # {os, install-method, update-method, tag}, split into a matrix per OS.
       - id: gen
+        env:
+          TAGS_JSON: ${{ steps.pick.outputs.tags }}
         run: |
           set -euo pipefail
-          matrices="$(node scripts/sandbox/generate-e2e-matrix.mjs \
-            --tags '${{ needs.pick-releases.outputs.tags }}')"
+          matrices="$(node scripts/sandbox/generate-e2e-matrix.mjs --tags "$TAGS_JSON")"
           echo "$matrices"
           for key in linux windows macos; do
             echo "$key=$(echo "$matrices" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.stringify(JSON.parse(d)[process.argv[1]])))' "$key")" >> "$GITHUB_OUTPUT"
@@ -159,7 +153,7 @@ jobs:
           # The plan, human-readable: a combination x starting-tag chart on
           # the run's summary page.
           node scripts/sandbox/generate-e2e-matrix.mjs \
-            --tags '${{ needs.pick-releases.outputs.tags }}' \
+            --tags "$TAGS_JSON" \
             --format markdown >> "$GITHUB_STEP_SUMMARY"
 
   linux:
@@ -168,12 +162,12 @@ jobs:
     # either way the whole linux matrix runs (legs are cheap and the
     # distinction wasn't worth a filter layer in the generator).
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "both", "update", "installer"]'), inputs.route)
-    needs: generate-matrix
+    needs: pick-releases
     strategy:
       # One leg breaking is worth knowing about even if another already
       # failed, so let every leg report.
       fail-fast: false
-      matrix: ${{ fromJSON(needs.generate-matrix.outputs.linux) }}
+      matrix: ${{ fromJSON(needs.pick-releases.outputs.linux) }}
     uses: ./.github/workflows/install-e2e-run.yml
     with:
       install-method: ${{ matrix.install_method }}
@@ -185,10 +179,10 @@ jobs:
   windows:
     name: ${{ matrix.name }}
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "windows-desktop"]'), inputs.route)
-    needs: generate-matrix
+    needs: pick-releases
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.generate-matrix.outputs.windows) }}
+      matrix: ${{ fromJSON(needs.pick-releases.outputs.windows) }}
     uses: ./.github/workflows/install-e2e-windows-run.yml
     with:
       install-method: ${{ matrix.install_method }}
@@ -200,10 +194,10 @@ jobs:
   macos:
     name: ${{ matrix.name }}
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "macos-desktop"]'), inputs.route)
-    needs: generate-matrix
+    needs: pick-releases
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.generate-matrix.outputs.macos) }}
+      matrix: ${{ fromJSON(needs.pick-releases.outputs.macos) }}
     # Two driver arms: the OS-agnostic script driver (shared with linux)
     # and the published-dmg GUI driver; the run workflow routes.
     uses: ./.github/workflows/install-e2e-macos-run.yml
@@ -226,10 +220,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Default shallow clone (blobs in the pack). Do not sparse-checkout:
+      # checkout@v6 then hits the promisor remote for the one file, and that
+      # follow-up is what 429'd Expand combinations (run 34350666891).
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: tests/install/e2e-assets/playback.html
-          sparse-checkout-cone-mode: false
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: install-e2e-player
@@ -251,12 +245,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Same as leg-player: a normal shallow clone, not sparse/partial.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: |
-            scripts/sandbox/generate-e2e-matrix.mjs
-            tests/install/e2e-assets/known-failures.json
-          sparse-checkout-cone-mode: false
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
