@@ -9,7 +9,7 @@ Each test leg installs an old released version, then updates it to HEAD. The ins
 The test family has four layers. Each layer has one job.
 
 1. `scripts/sandbox/generate-e2e-matrix.mjs` declares the support matrix. It lists every {os, install-method, update-method} pair. It expands the pairs against the sampled release tags. It knows nothing about which pairs CI can run.
-2. `.github/workflows/install-e2e.yml` is the primary workflow. It picks the release tags, runs the generator, and fans out one matrix job per OS. It also writes the plan chart and the result chart on the run summary.
+2. `.github/workflows/install-e2e.yml` is the primary workflow. One setup job picks the release tags and runs the generator, then fans out one matrix job per OS. It also writes the plan chart and the result chart on the run summary.
 3. The run workflows own the capability knowledge. `install-e2e-run.yml` serves linux. `install-e2e-windows-run.yml` serves windows. `install-e2e-macos-run.yml` selects either the shared script driver or the macOS GUI driver. Job-level `if:` gates select the supported pairs. All other pairs skip natively and show as grey.
 4. The drivers do the work. `tests/install/installer-script-e2e.sh` handles POSIX script installs, `tests/install/macos-desktop-e2e.sh` handles macOS dmg installs, and `tests/install/windows-e2e.ps1` handles Windows installs. Install and update methods are separate axes, subject to each workflow's capability gates.
 
